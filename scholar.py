@@ -76,12 +76,14 @@ class Article():
     """
     def __init__(self):
         self.attrs = {'title':         [None, 'Title',          0],
-                      'url':           [None, 'URL',            1],
-                      'num_citations': [0,    'Citations',      2],
-                      'num_versions':  [0,    'Versions',       3],
-                      'url_citations': [None, 'Citations list', 4],
-                      'url_versions':  [None, 'Versions list',  5],
-                      'year':          [None, 'Year',           6]}
+                      'authors':       [None, 'Authors',        1],
+                      'url':           [None, 'URL',            2],
+                      'num_citations': [0,    'Citations',      3],
+                      'num_versions':  [0,    'Versions',       4],
+                      'url_citations': [None, 'Citations list', 5],
+                      'url_versions':  [None, 'Versions list',  6],
+                      'year':          [None, 'Year',           7],
+                      'journal':       [None, 'Journal',        8]}
 
     def __getitem__(self, key):
         if key in self.attrs:
@@ -269,7 +271,7 @@ class ScholarQuerier():
     """
     SCHOLAR_URL = 'http://scholar.google.com/scholar?hl=en&q=%(query)s+author:%(author)s&btnG=Search&as_subj=eng&as_sdt=1,5&as_ylo=&as_vis=0'
     NOAUTH_URL = 'http://scholar.google.com/scholar?hl=en&q=%(query)s&btnG=Search&as_subj=eng&as_std=1,5&as_ylo=&as_vis=0'
-
+    SEARCH_AUTHOR_URL = 'http://scholar.google.com/citations?hl=en&view_op=search_authors&mauthors=%(author)s'
     """
     Older URLs:
     http://scholar.google.com/scholar?q=%s&hl=en&btnG=Search&as_sdt=2001&as_sdtp=on
@@ -285,14 +287,150 @@ class ScholarQuerier():
         def handle_article(self, art):
             self.querier.add_article(art)
 
-    def __init__(self, author='', scholar_url=None, count=0):
+    class AuthorParser():
+        """
+        Parser for the author page. Version date: 5 Dec 2013
+        """
+        PAGE_SIZE = '&view_op=list_works&pagesize=100'
+
+        def __init__(self, querier):
+            self.soup = None
+            self.querier = querier
+            self.author_url_pattern = '/citations?user='
+
+        def parse(self, html):
+            """
+            This method initiates parsing of HTML content for an author page.
+            It serach for a link with href = citations?user=XXXXXXXXXX=en
+            """
+            self.soup = BeautifulSoup(html)
+            for link in self.soup.findAll('a'):
+                s = ScholarParser.SCHOLAR_SITE + link.get('href') + self.PAGE_SIZE
+                if self.author_url_pattern in s:
+                    return s
+
+    class ViewCitationParser():
+        """
+            Parser for the view citation page. Version date: 5 Dec 2013
+        """
+
+        def __init__(self, querier):
+            self.soup = None
+            self.querier = querier
+            self.article_info = {}
+
+        def parse(self, html):
+            """
+            This method initiates parsing of HTML content for a citation view page.
+            """
+            self.soup = BeautifulSoup(html)
+            td_content_cell = self.soup.find(self._tag_checker)
+            self.article_info['url'] = td_content_cell.find(id='title').a.get('href')
+            for link in td_content_cell.findAll('a'):
+                url = link.get('href')
+                if ('&cluster=' in url) and (not url.endswith('&btnI=Lucky')):
+                    self.article_info['url_versions'] = link.get('href')
+                    self.article_info['num_versions'] = self._as_int(link.getText().split()[1])
+            return self.article_info
+
+        def _tag_checker(self, tag):
+            if tag.name == 'td' and tag.get('class') == 'cit-contentcell':
+                return True
+            return False
+
+        def _as_int(self, obj):
+            try:
+                return int(obj)
+            except ValueError:
+                return None
+
+    class CitationParser():
+        """
+        Parser for the author citation page. It invokes the handle_article() callback on each article
+    that was parsed successfully. Version date: 5 Dec 2013
+        """
+
+        def __init__(self, querier):
+            self.soup = None
+            self.querier = querier
+            self.site = ScholarParser.SCHOLAR_SITE
+
+        def parse(self, html):
+            """
+            This method initiates parsing of HTML content for an author citation page.
+            It serach for a table
+            """
+            self.soup = BeautifulSoup(html)
+            for tr in self.soup.findAll(self._tag_checker):
+                self._parse_article(tr)
+
+        def handle_article(self, art):
+            self.querier.add_article(art)
+
+        def _parse_article(self, tr):
+            self.article  = Article()
+            tag_article   = tr.find(id='col-title')
+            tag_citations = tr.find(id='col-citedby')
+            tag_year      = tr.find(id='col-year')
+
+            self.article['title'] = tag_article.a.getText()
+            # get the url for the citation view page I reclycle the ScholarQuery class ...
+            url = self._path2url(tag_article.a.get('href'))
+            querier = ScholarQuerier(self)
+            article_info = querier.query_citation_view(url)
+
+            if article_info.has_key('url'):
+                self.article['url'] = article_info['url']
+
+            if article_info.has_key('url_versions'):
+                self.article['num_versions'] = article_info['num_versions']
+                self.article['url_versions'] = article_info['url_versions']
+
+            spans = tag_article.findAll('span')
+            if (len(spans) > 0):
+                self.article['authors']       = spans[0].getText()
+                if (len(spans) > 1):
+                    self.article['journal']       = spans[1].getText()
+
+            if tag_citations.getText() != "":
+                self.article['num_citations'] = self._as_int(tag_citations.a.getText())
+                self.article['url_citations'] = self._path2url(tag_citations.a.get('href'))
+
+            self.article['year']          = tag_year.getText()
+
+            if self.article['title']:
+                self.handle_article(self.article)
+
+        def _tag_checker(self, tag):
+            if tag.name == 'tr' and tag.get('class') == 'cit-table item':
+                return True
+            return False
+
+        def _as_int(self, obj):
+            try:
+                return int(obj)
+            except ValueError:
+                return None
+
+        def _path2url(self, path):
+            if path.startswith('http://'):
+                return path
+            if not path.startswith('/'):
+                path = '/' + path
+            return self.site + path
+
+    def __init__(self, author='', scholar_url=None, count=0, search_author=False):
         self.articles = []
         self.author = author
+        self.search_author = search_author
+
         # Clip to 100, as Google doesn't support more anyway
         self.count = min(count, 100)
 
         if author == '':
             self.scholar_url = self.NOAUTH_URL
+        elif search_author:
+            self.scholar_url = self.SEARCH_AUTHOR_URL
         else:
             self.scholar_url = scholar_url or self.SCHOLAR_URL
 
@@ -315,6 +453,23 @@ class ScholarQuerier():
         html = hdl.read()
         self.parse(html)
 
+    def query_author(self, search):
+        """
+        This method initiates a query using the search author google scholar query
+        """
+        self.clear_articles()
+        url = self.scholar_url % {'author' : urllib.quote(self.author)}
+        req = urllib2.Request(url=url,
+                              headers={'User-Agent': self.UA})
+        hdl = self.opener.open(req)
+        html = hdl.read()
+        author_url = self.parse_author_page(html)
+        req = urllib2.Request(url=author_url,
+                              headers={'User-Agent': self.UA})
+        hdl = self.opener.open(req)
+        html = hdl.read()
+        self.parse_citation_page(html)
+
     def parse(self, html):
         """
         This method allows parsing of existing HTML content.
@@ -322,27 +477,64 @@ class ScholarQuerier():
         parser = self.Parser(self)
         parser.parse(html)
 
+    def parse_author_page(self, html):
+        """
+        This method allows parsing of an author page.
+        """
+        parser = self.AuthorParser(self)
+        return parser.parse(html)
+
+    def parse_citation_page(self, html):
+        """
+        This method allows parsing of an author citation page.
+        """
+        parser = self.CitationParser(self)
+        return parser.parse(html)
+
     def add_article(self, art):
         self.articles.append(art)
-    
+
     def clear_articles(self):
         """Clears any existing articles stored from previous queries."""
         self.articles = []
 
+    def query_citation_view(self, url):
+        """
+        This method initiates a query using the citation view url
+        """
+        req = urllib2.Request(url=url,
+                              headers={'User-Agent': self.UA})
+        hdl = self.opener.open(req)
+        html = hdl.read()
+        return self.parse_citation_view(html)
+
+    def parse_citation_view(self, html):
+        parser = self.ViewCitationParser(self)
+        return parser.parse(html)
 
 
-def txt(query, author, count):
-    querier = ScholarQuerier(author=author, count=count)
-    querier.query(query)
+def txt(query, author, count, search_author):
+    querier = ScholarQuerier(author=author, count=count, search_author=search_author)
+
+    if search_author:
+        querier.query_author(query)
+    else:
+        querier.query(query)
+
     articles = querier.articles
     if count > 0:
         articles = articles[:count]
     for art in articles:
         print art.as_txt() + '\n'
 
-def csv(query, author, count, header=False, sep='|'):
-    querier = ScholarQuerier(author=author, count=count)
-    querier.query(query)
+def csv(query, author, count, search_author, header=False, sep='|'):
+    querier = ScholarQuerier(author=author, count=count, search_author=search_author)
+
+    if search_author:
+        querier.query_author(query)
+    else:
+        querier.query(query)
+
     articles = querier.articles
     if count > 0:
         articles = articles[:count]
@@ -378,6 +570,8 @@ A command-line interface to Google Scholar."""
     parser = optparse.OptionParser(usage=usage, formatter=fmt)
     parser.add_option('-a', '--author',
                       help='Author name')
+    parser.add_option('-s', '--search-author', action='store_true',
+                      help='Use profile search author')
     parser.add_option('--csv', action='store_true',
                       help='Print article data in CSV format (separator is "|")')
     parser.add_option('--csv-header', action='store_true',
@@ -389,18 +583,22 @@ A command-line interface to Google Scholar."""
     parser.set_defaults(count=0, author='')
     options, args = parser.parse_args()
 
-    if len(args) == 0:
+    # in search author mode i don't need a query string
+    if ((len(args) == 0) and (not options.search_author)):
         print 'Hrrrm. I  need a query string.'
         sys.exit(1)
 
     query = ' '.join(args)
 
+    #sys.stderr.write('query: ' + query + "\n")
+    #sys.stderr.write('author: ' + options.author + "\n")
+
     if options.csv:
-        csv(query, author=options.author, count=options.count)
+        csv(query, author=options.author, count=options.count, search_author=options.search_author)
     elif options.csv_header:
-        csv(query, author=options.author, count=options.count, header=True)
+        csv(query, author=options.author, count=options.count, search_author=options.search_author, header=True)
     else:
-        txt(query, author=options.author, count=options.count)
+        txt(query, author=options.author, count=options.count, search_author=options.search_author)
 
 if __name__ == "__main__":
     main()
